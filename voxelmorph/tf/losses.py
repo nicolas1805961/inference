@@ -26,6 +26,7 @@ import numpy as np
 import neurite as ne
 import tensorflow as tf
 import tensorflow.keras.backend as K
+import matplotlib.pyplot as plt
 
 
 class NCC:
@@ -160,6 +161,22 @@ class TukeyBiweight:
 
         return tf.reduce_mean(rho)
 
+class Dice_other:
+
+    def dice_coef(self, y_true, y_pred, smooth=1e-5):        
+        y_true_f = K.flatten(y_true)
+        y_pred_f = K.flatten(y_pred)
+        intersection = K.sum(y_true_f * y_pred_f)
+        dice = (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
+        return 1 - dice
+
+    def loss(self, y_true, y_pred):
+        smooth = 1e-5
+        dice = 0
+        for index in [1, 2, 3]:
+            dice += self.dice_coef(y_true[:,:,:,index], y_pred[:,:,:,index], smooth)
+        return dice
+
 
 class Dice:
     """
@@ -221,12 +238,12 @@ class Grad:
         """
         returns Tensor of size [bs]
         """
-
         if self.penalty == 'l1':
             dif = [tf.abs(f) for f in self._diffs(y_pred)]
         else:
             assert self.penalty == 'l2', 'penalty can only be l1 or l2. Got: %s' % self.penalty
             dif = [f * f for f in self._diffs(y_pred)]
+
 
         df = [tf.reduce_mean(K.batch_flatten(f), axis=-1) for f in dif]
         grad = tf.add_n(df) / len(df)

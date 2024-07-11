@@ -4,9 +4,181 @@ import glob
 import numpy as np
 
 from . import py
+import matplotlib.pyplot as plt
+import pickle
 
 
 def volgen(
+    vol_names_moving,
+    vol_names_fixed,
+    batch_size=8,
+    segs_moving=None,
+    segs_fixed=None,
+    np_var='vol',
+    pad_shape=None,
+    resize_factor=1,
+    add_feat_axis=True
+):
+    """
+    Base generator for random volume loading. Volumes can be passed as a path to
+    the parent directory, a glob pattern, a list of file paths, or a list of
+    preloaded volumes. Corresponding segmentations are additionally loaded if
+    `segs` is provided as a list (of file paths or preloaded segmentations) or set
+    to True. If `segs` is True, npz files with variable names 'vol' and 'seg' are
+    expected. Passing in preloaded volumes (with optional preloaded segmentations)
+    allows volumes preloaded in memory to be passed to a generator.
+
+    Parameters:
+        vol_names: Path, glob pattern, list of volume files to load, or list of
+            preloaded volumes.
+        batch_size: Batch size. Default is 1.
+        segs: Loads corresponding segmentations. Default is None.
+        np_var: Name of the volume variable if loading npz files. Default is 'vol'.
+        pad_shape: Zero-pads loaded volumes to a given shape. Default is None.
+        resize_factor: Volume resize factor. Default is 1.
+        add_feat_axis: Load volume arrays with added feature axis. Default is True.
+    """
+
+    # convert glob path to filenames
+    if isinstance(vol_names_moving, str):
+        if os.path.isdir(vol_names_moving):
+            vol_names_moving = os.path.join(vol_names_moving, '*')
+        vol_names_moving = glob.glob(vol_names_moving)
+
+    if isinstance(segs_moving, list) and len(segs_moving) != len(vol_names_moving):
+        raise ValueError('Number of image files must match number of seg files.')
+
+    while True:
+        # generate [batchsize] random image indices
+        indices = np.random.randint(len(vol_names_moving), size=batch_size)
+
+        # load volumes and concatenate
+        load_params = dict(np_var=np_var, add_batch_axis=True, add_feat_axis=add_feat_axis,
+                           pad_shape=pad_shape, resize_factor=resize_factor)
+        
+        imgs_moving = [py.utils.load_volfile(vol_names_moving[i], **load_params) for i in indices]
+
+        random_slice_indices = []
+        for i in range(len(imgs_moving)):
+            r = np.random.randint(0, imgs_moving[i].shape[3])
+            random_slice_indices.append(r)
+        
+        imgs_moving = [x[:, :, :, r, :] for (x, r) in zip(imgs_moving, random_slice_indices)]
+        vols = [np.concatenate(imgs_moving, axis=0)]
+
+        # optionally load segmentations and concatenate
+        if segs_moving is True:
+            # assume inputs are npz files with 'seg' key
+            load_params['np_var'] = 'seg'  # be sure to load seg
+            s = [py.utils.load_volfile(vol_names[i], **load_params) for i in indices]
+            s = [x[:, :, :, r, :] for (x, r) in zip(s, random_slice_indices)]
+            vols.append(np.concatenate(s, axis=0))
+        elif isinstance(segs_moving, list):
+            # assume segs is a corresponding list of files or preloaded volumes
+            s = [py.utils.load_volfile(segs_moving[i], **load_params) for i in indices]
+            s = [x[:, :, :, r, :] for (x, r) in zip(s, random_slice_indices)]
+            vols.append(np.concatenate(s, axis=0))
+
+        imgs_fixed = [py.utils.load_volfile(vol_names_fixed[i], **load_params) for i in indices]
+        imgs_fixed = [x[:, :, :, r, :] for (x, r) in zip(imgs_fixed, random_slice_indices)]
+        vols.append(np.concatenate(imgs_fixed, axis=0))
+
+        # optionally load segmentations and concatenate
+        if segs_fixed is True:
+            # assume inputs are npz files with 'seg' key
+            load_params['np_var'] = 'seg'  # be sure to load seg
+            s = [py.utils.load_volfile(vol_names[i], **load_params) for i in indices]
+            s = [x[:, :, :, r, :] for (x, r) in zip(s, random_slice_indices)]
+            vols.append(np.concatenate(s, axis=0))
+        elif isinstance(segs_fixed, list):
+            # assume segs is a corresponding list of files or preloaded volumes
+            s = [py.utils.load_volfile(segs_fixed[i], **load_params) for i in indices]
+            s = [x[:, :, :, r, :] for (x, r) in zip(s, random_slice_indices)]
+            vols.append(np.concatenate(s, axis=0))
+
+        yield tuple(vols)
+
+
+
+def volgen2(
+        train_paths_ed,
+        train_paths_es,
+    batch_size=8,
+    np_var='vol',
+    pad_shape=None,
+    resize_factor=1,
+    add_feat_axis=True
+):
+    """
+    Base generator for random volume loading. Volumes can be passed as a path to
+    the parent directory, a glob pattern, a list of file paths, or a list of
+    preloaded volumes. Corresponding segmentations are additionally loaded if
+    `segs` is provided as a list (of file paths or preloaded segmentations) or set
+    to True. If `segs` is True, npz files with variable names 'vol' and 'seg' are
+    expected. Passing in preloaded volumes (with optional preloaded segmentations)
+    allows volumes preloaded in memory to be passed to a generator.
+
+    Parameters:
+        vol_names: Path, glob pattern, list of volume files to load, or list of
+            preloaded volumes.
+        batch_size: Batch size. Default is 1.
+        segs: Loads corresponding segmentations. Default is None.
+        np_var: Name of the volume variable if loading npz files. Default is 'vol'.
+        pad_shape: Zero-pads loaded volumes to a given shape. Default is None.
+        resize_factor: Volume resize factor. Default is 1.
+        add_feat_axis: Load volume arrays with added feature axis. Default is True.
+    """
+
+    while True:
+        # generate [batchsize] random image indices
+        indices = np.random.randint(len(train_paths_es), size=batch_size)
+
+        # load volumes and concatenate
+        load_params = dict(np_var=np_var, add_batch_axis=True, add_feat_axis=add_feat_axis,
+                           pad_shape=pad_shape, resize_factor=resize_factor)
+        
+        imgs_seg_tuple_list_moving = [py.utils.load_volfile(train_paths_es[i], **load_params) for i in indices]
+
+        #print([train_paths_es[i] for i in indices])
+        #print('***********************************************')
+
+        imgs_moving = []
+        segs_moving = []
+        for i in range(len(imgs_seg_tuple_list_moving)):
+            imgs_moving.append(imgs_seg_tuple_list_moving[i][0])
+            segs_moving.append(imgs_seg_tuple_list_moving[i][1])
+
+        random_slice_indices = []
+        for i in range(len(imgs_moving)):
+            r = np.random.randint(0, imgs_moving[i].shape[3])
+            random_slice_indices.append(r)
+        
+        imgs_moving = [x[:, :, :, r, :] for (x, r) in zip(imgs_moving, random_slice_indices)]
+        segs_moving = [x[:, :, :, r, :] for (x, r) in zip(segs_moving, random_slice_indices)]
+        vols = [np.concatenate(imgs_moving, axis=0)]
+        vols.append(np.concatenate(segs_moving, axis=0))
+
+        imgs_seg_tuple_list_fixed = [py.utils.load_volfile(train_paths_ed[i], **load_params) for i in indices]
+
+        #print([train_paths_ed[i] for i in indices])
+        #print('***********************************************')
+
+        imgs_fixed = []
+        segs_fixed = []
+        for i in range(len(imgs_seg_tuple_list_fixed)):
+            imgs_fixed.append(imgs_seg_tuple_list_fixed[i][0])
+            segs_fixed.append(imgs_seg_tuple_list_fixed[i][1])
+        
+        imgs_fixed = [x[:, :, :, r, :] for (x, r) in zip(imgs_fixed, random_slice_indices)]
+        segs_fixed = [x[:, :, :, r, :] for (x, r) in zip(segs_fixed, random_slice_indices)]
+        vols.append(np.concatenate(imgs_fixed, axis=0))
+        vols.append(np.concatenate(segs_fixed, axis=0))
+
+        yield tuple(vols)
+
+
+
+def volgen3D(
     vol_names,
     batch_size=1,
     segs=None,
@@ -46,11 +218,15 @@ def volgen(
 
     while True:
         # generate [batchsize] random image indices
-        indices = np.random.randint(len(vol_names), size=batch_size)
+        possible_indices = np.arange(0, len(vol_names), step=2)
+        indices = np.random.choice(possible_indices, size=batch_size)
+        #indices = np.random.randint(len(vol_names), size=batch_size)
 
         # load volumes and concatenate
         load_params = dict(np_var=np_var, add_batch_axis=True, add_feat_axis=add_feat_axis,
                            pad_shape=pad_shape, resize_factor=resize_factor)
+        
+        
         imgs = [py.utils.load_volfile(vol_names[i], **load_params) for i in indices]
         vols = [np.concatenate(imgs, axis=0)]
 
@@ -65,10 +241,24 @@ def volgen(
             s = [py.utils.load_volfile(segs[i], **load_params) for i in indices]
             vols.append(np.concatenate(s, axis=0))
 
+        imgs = [py.utils.load_volfile(vol_names[i + 1], **load_params) for i in indices]
+        vols.append(np.concatenate(imgs, axis=0))
+
+        # optionally load segmentations and concatenate
+        if segs is True:
+            # assume inputs are npz files with 'seg' key
+            load_params['np_var'] = 'seg'  # be sure to load seg
+            s = [py.utils.load_volfile(vol_names[i + 1], **load_params) for i in indices]
+            vols.append(np.concatenate(s, axis=0))
+        elif isinstance(segs, list):
+            # assume segs is a corresponding list of files or preloaded volumes
+            s = [py.utils.load_volfile(segs[i + 1], **load_params) for i in indices]
+            vols.append(np.concatenate(s, axis=0))
+
         yield tuple(vols)
 
 
-def scan_to_scan(vol_names, bidir=False, batch_size=1, prob_same=0, no_warp=False, **kwargs):
+def scan_to_scan(vol_names_moving, vol_names_fixed, bidir=False, batch_size=1, prob_same=0, no_warp=False, **kwargs):
     """
     Generator for scan-to-scan registration.
 
@@ -82,7 +272,7 @@ def scan_to_scan(vol_names, bidir=False, batch_size=1, prob_same=0, no_warp=Fals
         kwargs: Forwarded to the internal volgen generator.
     """
     zeros = None
-    gen = volgen(vol_names, batch_size=batch_size, **kwargs)
+    gen = volgen(vol_names_moving, vol_names_fixed, batch_size=batch_size, **kwargs)
     while True:
         scan1 = next(gen)[0]
         scan2 = next(gen)[0]
@@ -143,7 +333,7 @@ def scan_to_atlas(vol_names, atlas, bidir=False, batch_size=1, no_warp=False, se
         yield (invols, outvols)
 
 
-def semisupervised(vol_names, seg_names, labels, atlas_file=None, downsize=2):
+def semisupervised(vol_names_moving, vol_names_fixed, seg_names_moving, seg_names_fixed, labels, atlas_file=None, downsize=2):
     """
     Generator for semi-supervised registration training using ground truth segmentations.
     Scan-to-atlas training can be enabled by providing the atlas_file argument. 
@@ -156,7 +346,240 @@ def semisupervised(vol_names, seg_names, labels, atlas_file=None, downsize=2):
         downsize: Downsize factor for segmentations. Default is 2.
     """
     # configure base generator
-    gen = volgen(vol_names, segs=seg_names, np_var='vol')
+    gen = volgen(vol_names_moving, vol_names_fixed, segs_moving=seg_names_moving, segs_fixed=seg_names_fixed, np_var='vol')
+    zeros = None
+
+    # internal utility to generate downsampled prob seg from discrete seg
+    def split_seg(seg):
+        prob_seg = np.zeros((*seg.shape[:4], len(labels)))
+        for i, label in enumerate(labels):
+            prob_seg[0, ..., i] = seg[0, ..., 0] == label
+        return prob_seg[:, ::downsize, ::downsize, ::downsize, :]
+    
+    def split_seg_2d(seg):
+        prob_seg = np.zeros((*seg.shape[:3], len(labels)))
+        for i, label in enumerate(labels):
+            prob_seg[0, ..., i] = seg[0, ..., 0] == label
+        return prob_seg[:, ::downsize, ::downsize, :]
+
+    # cache target vols and segs if atlas is supplied
+    if atlas_file:
+        trg_vol = py.utils.load_volfile(atlas_file, np_var='vol',
+                                        add_batch_axis=True, add_feat_axis=True)
+        trg_seg = py.utils.load_volfile(atlas_file, np_var='seg',
+                                        add_batch_axis=True, add_feat_axis=True)
+        trg_seg = split_seg(trg_seg)
+
+    while True:
+        # load source vol and seg
+        src_vol, src_seg, trg_vol, trg_seg = next(gen)
+        #trg_vol, trg_seg, src_vol, src_seg = next(gen) # switch here because we want to register es to ed
+
+        #fig, ax = plt.subplots(2, 2)
+        #ax[0, 0].imshow(src_vol[0, :, :, 0], cmap='gray')
+        #ax[0, 1].imshow(src_seg[0, :, :, 0], cmap='gray')
+        #ax[1, 0].imshow(trg_vol[0, :, :, 0], cmap='gray')
+        #ax[1, 1].imshow(trg_seg[0, :, :, 0], cmap='gray')
+        #plt.show()
+
+        #fig, ax = plt.subplots(2, 4)
+        #ax[0, 0].imshow(src_vol[0, :, :, 0], cmap='gray')
+        #ax[0, 1].imshow(trg_vol[0, :, :, 0], cmap='gray')
+        #ax[0, 2].imshow(src_seg[0, :, :, 0], cmap='gray')
+        #ax[0, 3].imshow(trg_seg[0, :, :, 0], cmap='gray')
+        #ax[1, 0].imshow(src_vol[1, :, :, 0], cmap='gray')
+        #ax[1, 1].imshow(trg_vol[1, :, :, 0], cmap='gray')
+        #ax[1, 2].imshow(src_seg[1, :, :, 0], cmap='gray')
+        #ax[1, 3].imshow(trg_seg[1, :, :, 0], cmap='gray')
+        #plt.show()
+
+        src_seg = split_seg_2d(src_seg)
+        trg_seg = split_seg_2d(trg_seg)
+        
+        # load target vol and seg (if not provided by atlas)
+        #if not atlas_file:
+        #    trg_vol, trg_seg = next(gen)
+        #    trg_seg = split_seg(trg_seg)
+
+        # cache zeros
+        if zeros is None:
+            shape = src_vol.shape[1:-1]
+            zeros = np.zeros((1, *shape, len(shape)))
+
+        invols = [src_vol, trg_vol, src_seg]
+        outvols = [trg_vol, zeros, trg_seg]
+        yield (invols, outvols)
+
+
+
+def semisupervised2(all_paths_ed, all_paths_es, labels, atlas_file=None, downsize=2):
+    """
+    Generator for semi-supervised registration training using ground truth segmentations.
+    Scan-to-atlas training can be enabled by providing the atlas_file argument. 
+
+    Parameters:
+        vol_names: List of volume files to load, or list of preloaded volumes.
+        seg_names: List of corresponding seg files to load, or list of preloaded volumes.
+        labels: Array of discrete label values to use in training.
+        atlas_file: Atlas npz file for scan-to-atlas training. Default is None.
+        downsize: Downsize factor for segmentations. Default is 2.
+    """
+    # configure base generator
+    gen = volgen2(all_paths_ed, all_paths_es, np_var='vol')
+    zeros = None
+
+    # internal utility to generate downsampled prob seg from discrete seg
+    def split_seg(seg):
+        prob_seg = np.zeros((*seg.shape[:4], len(labels)))
+        for i, label in enumerate(labels):
+            prob_seg[0, ..., i] = seg[0, ..., 0] == label
+        return prob_seg[:, ::downsize, ::downsize, ::downsize, :]
+    
+    def split_seg_2d(seg):
+        prob_seg = np.zeros((*seg.shape[:3], len(labels)))
+        for i, label in enumerate(labels):
+            prob_seg[0, ..., i] = seg[0, ..., 0] == label
+        return prob_seg[:, ::downsize, ::downsize, :]
+
+    # cache target vols and segs if atlas is supplied
+    if atlas_file:
+        trg_vol = py.utils.load_volfile(atlas_file, np_var='vol',
+                                        add_batch_axis=True, add_feat_axis=True)
+        trg_seg = py.utils.load_volfile(atlas_file, np_var='seg',
+                                        add_batch_axis=True, add_feat_axis=True)
+        trg_seg = split_seg(trg_seg)
+
+    while True:
+        # load source vol and seg
+        src_vol, src_seg, trg_vol, trg_seg = next(gen)
+        #trg_vol, trg_seg, src_vol, src_seg = next(gen) # switch here because we want to register es to ed
+
+        #fig, ax = plt.subplots(2, 2)
+        #ax[0, 0].imshow(src_vol[0, :, :, 0], cmap='gray')
+        #ax[0, 1].imshow(src_seg[0, :, :, 0], cmap='gray')
+        #ax[1, 0].imshow(trg_vol[0, :, :, 0], cmap='gray')
+        #ax[1, 1].imshow(trg_seg[0, :, :, 0], cmap='gray')
+        #plt.show()
+
+        #fig, ax = plt.subplots(2, 4)
+        #ax[0, 0].imshow(src_vol[0, :, :, 0], cmap='gray')
+        #ax[0, 1].imshow(trg_vol[0, :, :, 0], cmap='gray')
+        #ax[0, 2].imshow(src_seg[0, :, :, 0], cmap='gray')
+        #ax[0, 3].imshow(trg_seg[0, :, :, 0], cmap='gray')
+        #ax[1, 0].imshow(src_vol[1, :, :, 0], cmap='gray')
+        #ax[1, 1].imshow(trg_vol[1, :, :, 0], cmap='gray')
+        #ax[1, 2].imshow(src_seg[1, :, :, 0], cmap='gray')
+        #ax[1, 3].imshow(trg_seg[1, :, :, 0], cmap='gray')
+        #plt.show()
+
+        src_seg = split_seg_2d(src_seg)
+        trg_seg = split_seg_2d(trg_seg)
+        
+        # load target vol and seg (if not provided by atlas)
+        #if not atlas_file:
+        #    trg_vol, trg_seg = next(gen)
+        #    trg_seg = split_seg(trg_seg)
+
+        # cache zeros
+        if zeros is None:
+            shape = src_vol.shape[1:-1]
+            zeros = np.zeros((1, *shape, len(shape)))
+
+        invols = [src_vol, trg_vol, src_seg]
+        outvols = [trg_vol, zeros, trg_seg]
+        yield (invols, outvols)
+
+
+def semisupervised_torch(vol_names_moving, vol_names_fixed, seg_names_moving, seg_names_fixed, labels, atlas_file=None, downsize=2):
+    """
+    Generator for semi-supervised registration training using ground truth segmentations.
+    Scan-to-atlas training can be enabled by providing the atlas_file argument. 
+
+    Parameters:
+        vol_names: List of volume files to load, or list of preloaded volumes.
+        seg_names: List of corresponding seg files to load, or list of preloaded volumes.
+        labels: Array of discrete label values to use in training.
+        atlas_file: Atlas npz file for scan-to-atlas training. Default is None.
+        downsize: Downsize factor for segmentations. Default is 2.
+    """
+    # configure base generator
+    gen = volgen(vol_names_moving, vol_names_fixed, segs_moving=seg_names_moving, segs_fixed=seg_names_fixed, np_var='vol')
+    zeros = None
+
+    # internal utility to generate downsampled prob seg from discrete seg
+    def split_seg(seg):
+        prob_seg = np.zeros((*seg.shape[:4], len(labels)))
+        for i, label in enumerate(labels):
+            prob_seg[0, ..., i] = seg[0, ..., 0] == label
+        return prob_seg[:, ::downsize, ::downsize, ::downsize, :]
+    
+    def split_seg_2d_torch(seg):
+        prob_seg = np.zeros((*seg.shape[:3], len(labels)))
+        for i, label in enumerate(labels):
+            prob_seg[0, ..., i] = seg[0, ..., 0] == label
+        return prob_seg
+
+    # cache target vols and segs if atlas is supplied
+    if atlas_file:
+        trg_vol = py.utils.load_volfile(atlas_file, np_var='vol',
+                                        add_batch_axis=True, add_feat_axis=True)
+        trg_seg = py.utils.load_volfile(atlas_file, np_var='seg',
+                                        add_batch_axis=True, add_feat_axis=True)
+        trg_seg = split_seg(trg_seg)
+
+    while True:
+        # load source vol and seg
+        src_vol, src_seg, trg_vol, trg_seg = next(gen)
+
+        #fig, ax = plt.subplots(2, 2)
+        #ax[0, 0].imshow(src_vol[0, :, :, 0], cmap='gray')
+        #ax[0, 1].imshow(src_seg[0, :, :, 0], cmap='gray')
+        #ax[1, 0].imshow(trg_vol[0, :, :, 0], cmap='gray')
+        #ax[1, 1].imshow(trg_seg[0, :, :, 0], cmap='gray')
+        #plt.show()
+
+        #fig, ax = plt.subplots(2, 4)
+        #ax[0, 0].imshow(src_vol[0, :, :, 0], cmap='gray')
+        #ax[0, 1].imshow(trg_vol[0, :, :, 0], cmap='gray')
+        #ax[0, 2].imshow(src_seg[0, :, :, 0], cmap='gray')
+        #ax[0, 3].imshow(trg_seg[0, :, :, 0], cmap='gray')
+        #ax[1, 0].imshow(src_vol[1, :, :, 0], cmap='gray')
+        #ax[1, 1].imshow(trg_vol[1, :, :, 0], cmap='gray')
+        #ax[1, 2].imshow(src_seg[1, :, :, 0], cmap='gray')
+        #ax[1, 3].imshow(trg_seg[1, :, :, 0], cmap='gray')
+        #plt.show()
+
+        src_seg = split_seg_2d_torch(src_seg)
+        trg_seg = split_seg_2d_torch(trg_seg)
+        
+        # load target vol and seg (if not provided by atlas)
+        #if not atlas_file:
+        #    trg_vol, trg_seg = next(gen)
+        #    trg_seg = split_seg(trg_seg)
+
+        # cache zeros
+        if zeros is None:
+            shape = src_vol.shape[1:-1]
+            zeros = np.zeros((1, *shape, len(shape)))
+
+        yield ([src_vol, trg_vol], [src_seg, trg_seg])
+
+
+def semisupervised3D(vol_names, seg_names, labels, atlas_file=None, downsize=2):
+    """
+    Generator for semi-supervised registration training using ground truth segmentations.
+    Scan-to-atlas training can be enabled by providing the atlas_file argument. 
+
+    Parameters:
+        vol_names: List of volume files to load, or list of preloaded volumes.
+        seg_names: List of corresponding seg files to load, or list of preloaded volumes.
+        labels: Array of discrete label values to use in training.
+        atlas_file: Atlas npz file for scan-to-atlas training. Default is None.
+        downsize: Downsize factor for segmentations. Default is 2.
+    """
+    # configure base generator
+    #gen = volgen(vol_names, segs=seg_names, np_var='vol')
+    gen = volgen3D(vol_names, segs=seg_names, np_var='vol')
     zeros = None
 
     # internal utility to generate downsampled prob seg from discrete seg
@@ -176,22 +599,38 @@ def semisupervised(vol_names, seg_names, labels, atlas_file=None, downsize=2):
 
     while True:
         # load source vol and seg
-        src_vol, src_seg = next(gen)
-        src_seg = split_seg(src_seg)
+        src_vol, src_seg, trg_vol, trg_seg = next(gen)
 
+        #fig, ax = plt.subplots(2, 2)
+        #ax[0, 0].imshow(src_vol[0, :, :, 0], cmap='gray')
+        #ax[0, 1].imshow(src_seg[0, :, :, 0], cmap='gray')
+        #ax[1, 0].imshow(trg_vol[0, :, :, 0], cmap='gray')
+        #ax[1, 1].imshow(trg_seg[0, :, :, 0], cmap='gray')
+        #plt.show()
+
+        src_seg = split_seg(src_seg)
+        trg_seg = split_seg(trg_seg)
+        
         # load target vol and seg (if not provided by atlas)
-        if not atlas_file:
-            trg_vol, trg_seg = next(gen)
-            trg_seg = split_seg(trg_seg)
+        #if not atlas_file:
+        #    trg_vol, trg_seg = next(gen)
+        #    trg_seg = split_seg(trg_seg)
 
         # cache zeros
         if zeros is None:
             shape = src_vol.shape[1:-1]
             zeros = np.zeros((1, *shape, len(shape)))
 
-        invols = [src_vol, trg_vol, src_seg]
-        outvols = [trg_vol, zeros, trg_seg]
-        yield (invols, outvols)
+        #print(src_vol.shape)
+        #print(src_seg.shape)
+        #fig, ax = plt.subplots(1, 4)
+        #ax[0].imshow(src_vol[0, :, :, 0], cmap='gray')
+        #ax[1].imshow(trg_vol[0, :, :, 0], cmap='gray')
+        #ax[2].imshow(np.argmax(src_seg[0, :, :, :], axis=-1), cmap='gray')
+        #ax[3].imshow(np.argmax(trg_seg[0, :, :, :], axis=-1), cmap='gray')
+        #plt.show()
+
+        yield ([src_vol, trg_vol], [src_seg, trg_seg])
 
 
 def template_creation(vol_names, bidir=False, batch_size=1, **kwargs):

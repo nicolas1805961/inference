@@ -102,7 +102,9 @@ def load_volfile(
         vol = np.squeeze(img.dataobj)
         affine = img.affine
     elif filename.endswith('.npy'):
-        vol = np.load(filename)
+        data = np.load(filename)
+        vol = data[0]
+        seg = data[1]
         affine = None
     elif filename.endswith('.npz'):
         npz = np.load(filename)
@@ -113,17 +115,21 @@ def load_volfile(
 
     if pad_shape:
         vol, _ = pad(vol, pad_shape)
+        seg, _ = pad(seg, pad_shape)
 
     if add_feat_axis:
         vol = vol[..., np.newaxis]
+        seg = seg[..., np.newaxis]
 
     if resize_factor != 1:
         vol = resize(vol, resize_factor)
+        seg = resize(seg, resize_factor)
 
     if add_batch_axis:
         vol = vol[np.newaxis, ...]
+        seg = seg[np.newaxis, ...]
 
-    return (vol, affine) if ret_affine else vol
+    return (vol, seg)
 
 
 def save_volfile(array, filename, affine=None):

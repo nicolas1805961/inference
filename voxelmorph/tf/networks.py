@@ -338,6 +338,7 @@ class VxmDenseSemiSupervisedSeg(ne.modelio.LoadableModel):
             1 / seg_resolution, name=f'{name}_seg_resize')(vxm_model.references.pos_flow)
         y_seg_src = layers.SpatialTransformer(interp_method='linear',
                                               name=f'{name}_seg_transformer')([seg_src, seg_flow])
+        
 
         inputs = vxm_model.inputs + [seg_src]
         outputs = vxm_model.outputs + [y_seg_src]
@@ -1048,7 +1049,6 @@ class Unet(tf.keras.Model):
                  input_model=None,
                  nb_features=None,
                  nb_levels=None,
-                 max_pool=2,
                  feat_mult=1,
                  nb_conv_per_level=1,
                  do_res=False,
@@ -1125,8 +1125,16 @@ class Unet(tf.keras.Model):
         dec_nf = dec_nf[:nb_dec_convs]
         nb_levels = int(nb_dec_convs / nb_conv_per_level) + 1
 
-        if isinstance(max_pool, int):
-            max_pool = [max_pool] * nb_levels
+
+        if ndims == 3:
+            max_pool=(2, 2, 1)
+            if isinstance(max_pool, tuple):
+                max_pool = [max_pool for i in range(nb_levels)]
+        else:
+            max_pool=2
+            if isinstance(max_pool, int):
+                max_pool = [max_pool] * nb_levels
+        
 
         # configure encoder (down-sampling path)
         enc_layers = []
@@ -1279,7 +1287,8 @@ def _upsample_block(x, connection, factor=2, name=None):
     assert ndims in (1, 2, 3), 'ndims should be one of 1, 2, or 3. found: %d' % ndims
     UpSampling = getattr(KL, 'UpSampling%dD' % ndims)
 
-    size = (factor,) * ndims if ndims > 1 else factor
+    #size = (factor,) * ndims if ndims > 1 else factor
+    size =  factor
     upsampled = UpSampling(size=size, name=name)(x)
     name = name + '_concat' if name else None
     return KL.concatenate([upsampled, connection], name=name)
