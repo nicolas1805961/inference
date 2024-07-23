@@ -118,7 +118,7 @@ def delete_if_exist(folder_name):
 
 
 
-def inference_window_all_chunk_whole(path_list_gz, newpath_flow_forward, newpath_flow_backward, newpath_registered_forward, newpath_registered_backward, model, image_size, es_number, label_input, binary_distance_input, distance_map_power):
+def inference_window_all_chunk_whole(path_list_gz, newpath_flow_forward, newpath_flow_backward, newpath_registered_forward, newpath_registered_backward, model, image_size, es_number, label_input, binary_distance_input):
     motion_estimation = SpatialTransformer(size=(image_size, image_size)).to('cuda:0')
 
     patient_name = os.path.basename(path_list_gz[0]).split('_')[0]
@@ -229,21 +229,13 @@ def inference_window_all_chunk_whole(path_list_gz, newpath_flow_forward, newpath
 
             chunk_x = NormalizeIntensity()(chunk_x)
 
-            with torch.no_grad():
-                if label_input:
-                    chunk_mask = torch.pow(4 * torch.exp(-chunk_mask) / ((1 + torch.exp(-chunk_mask))**2), distance_map_power)
+            distance = np.ones(shape=(len(chunk_x)-1,)) / len(chunk_x)
+            distance = np.concatenate([distance, np.zeros(shape=(1,))])
+            distance = torch.from_numpy(distance).to('cuda:0').float()
+            distance = distance[:, None]
 
-                    #fig, ax = plt.subplots(1, 3)
-                    #ax[0].imshow(chunk_mask[0, 0, 0].cpu(), cmap='hot')
-                    #ax[1].imshow(chunk_mask[0, 0, 1].cpu(), cmap='hot')
-                    #ax[2].imshow(chunk_mask[0, 0, 2].cpu(), cmap='hot')
-                    #plt.show()
-                    
-                    if binary_distance_input:
-                        chunk_mask = chunk_mask.long().float()
-                    out = model(chunk_x, label=chunk_mask, step=1)
-                else:
-                    out = model(chunk_x, step=1)
+            with torch.no_grad():
+                out = model(chunk_x, distance=distance, step=1)
             backward_flow_pred = out['backward_flow'].detach().to('cpu')
             #del chunk_x
             torch.cuda.empty_cache()
@@ -970,6 +962,6 @@ for (path_list_gz, path_list_pkl) in tqdm(zip(all_patient_paths, all_patient_pat
 
     with torch.no_grad():
         if config['video_length'] > 2:
-            inference_window_all_chunk_whole(path_list_gz, newpath_flow_forward, newpath_flow_backward, newpath_registered_forward, newpath_registered_backward, model, image_size, es_number, label_input=config['label_input'], binary_distance_input=config['binary_distance_input'], distance_map_power=config['distance_map_power'])
+            inference_window_all_chunk_whole(path_list_gz, newpath_flow_forward, newpath_flow_backward, newpath_registered_forward, newpath_registered_backward, model, image_size, es_number, label_input=config['label_input'], binary_distance_input=config['binary_distance_input'])
 
     

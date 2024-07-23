@@ -51,7 +51,7 @@ import nibabel as nib
 import torch
 from nnunet.lib.training_utils import read_config_video, build_seg_flow_gaussian_model, read_config, build_2d_model
 from nnunet.network_architecture.integration import SpatialTransformer
-from nnunet.lib.utils import ConvBlocks2DGroup
+from nnunet.lib.utils import ConvBlocksLegacy
 
 # import voxelmorph with pytorch backend
 os.environ['NEURITE_BACKEND'] = 'pytorch'
@@ -118,24 +118,11 @@ def delete_if_exist(folder_name):
 
 
 
-def inference_window_all_chunk_whole(path_list_gz, newpath_flow_forward, newpath_flow_backward, newpath_registered_forward, newpath_registered_backward, model, image_size, es_number, label_input, binary_distance_input, distance_map_power):
-    motion_estimation = SpatialTransformer(size=(image_size, image_size)).to('cuda:0')
+def inference_window_all_chunk_whole(path_list_gz, newpath_registered_backward, model, es_number):
 
     patient_name = os.path.basename(path_list_gz[0]).split('_')[0]
 
-    newpath_flow_forward = os.path.join(newpath_flow_forward, patient_name)
-    newpath_flow_backward = os.path.join(newpath_flow_backward, patient_name)
-    newpath_registered_forward = os.path.join(newpath_registered_forward, patient_name)
     newpath_registered_backward = os.path.join(newpath_registered_backward, patient_name)
-
-    delete_if_exist(newpath_flow_forward)
-    os.makedirs(newpath_flow_forward)
-
-    delete_if_exist(newpath_flow_backward)
-    os.makedirs(newpath_flow_backward)
-
-    delete_if_exist(newpath_registered_forward)
-    os.makedirs(newpath_registered_forward)
 
     delete_if_exist(newpath_registered_backward)
     os.makedirs(newpath_registered_backward)
@@ -227,28 +214,19 @@ def inference_window_all_chunk_whole(path_list_gz, newpath_flow_forward, newpath
             #plt.show()
             #exit(0)
 
-            chunk_x = NormalizeIntensity()(chunk_x)
 
             with torch.no_grad():
-                if label_input:
-                    chunk_mask = torch.pow(4 * torch.exp(-chunk_mask) / ((1 + torch.exp(-chunk_mask))**2), distance_map_power)
-
-                    #fig, ax = plt.subplots(1, 3)
-                    #ax[0].imshow(chunk_mask[0, 0, 0].cpu(), cmap='hot')
-                    #ax[1].imshow(chunk_mask[0, 0, 1].cpu(), cmap='hot')
-                    #ax[2].imshow(chunk_mask[0, 0, 2].cpu(), cmap='hot')
-                    #plt.show()
-                    
-                    if binary_distance_input:
-                        chunk_mask = chunk_mask.long().float()
-                    out = model(chunk_x, label=chunk_mask, step=1)
-                else:
-                    out = model(chunk_x, step=1)
-            backward_flow_pred = out['backward_flow'].detach().to('cpu')
+                softmax_output = []
+                for t in range(len(chunk_x)):
+                    current_input = NormalizeIntensity()(chunk_x[t])
+                    out = model(current_input)
+                    current_softmax_output = torch.softmax(out['pred'], dim=1).detach().to('cpu')
+                    softmax_output.append(current_softmax_output)
+                softmax_output = torch.stack(softmax_output, dim=0)
             #del chunk_x
             torch.cuda.empty_cache()
 
-            chunk_list_backward_flow.append(backward_flow_pred)
+            chunk_list_backward_flow.append(softmax_output)
 
         nan_tensor_1 = torch.full(size=(len(chunk1),) + chunk_list_backward_flow[0].shape[1:], fill_value=torch.nan, device='cuda:0')
         nan_tensor_2 = torch.full(size=(len(chunk2),) + chunk_list_backward_flow[1].shape[1:], fill_value=torch.nan, device='cuda:0')
@@ -258,42 +236,21 @@ def inference_window_all_chunk_whole(path_list_gz, newpath_flow_forward, newpath
         assert torch.all(torch.isfinite(nan_tensor_1))
         assert torch.all(torch.isfinite(nan_tensor_2))
         
-        warp = torch.cat([nan_tensor_1, torch.flip(nan_tensor_2, dims=[0])], dim=0)
+        seg_pred = torch.cat([nan_tensor_1, torch.flip(nan_tensor_2[1:], dims=[0])], dim=0)
 
-        assert len(warp) == len(current_x) - 1
+        assert len(seg_pred) == len(current_x)
 
-        registered_list = []
-        for t in range(len(warp)):
-            moving_seg = gt[t + 1]
-            current_moving_seg = moving_seg[:, :, :, :, d]
-            ed_target = torch.nn.functional.one_hot(current_moving_seg[:, 0].long(), num_classes=4).permute(0, 3, 1, 2).contiguous().float()
-
-            registered = motion_estimation(flow=warp[t], original=ed_target, mode='bilinear')
-            #moved = torch.argmax(registered, dim=1, keepdim=True).int() # B, 1, H, W
-            registered_list.append(registered)
-        moved_backward = torch.stack(registered_list, dim=0)
-        assert len(moved_backward) == len(current_x) - 1
-
-
-        out_list_backward.append(moved_backward[:, 0])
-        out_list_flow_backward.append(warp[:, 0].permute(0, 2, 3, 1).contiguous())
-        out_list_img_backward.append(current_x[1:, 0, 0])
+        out_list_backward.append(seg_pred[:, 0])
     
-    moved_backward = torch.stack(out_list_backward, dim=4).detach().cpu().numpy() # T - 1, C, H, W, D
-    flow_backward = torch.stack(out_list_flow_backward, dim=3).detach().cpu().numpy() # T - 1, H, W, D, 2
-    img_backward = torch.stack(out_list_img_backward, dim=3).detach().cpu().numpy() # T - 1, H, W, D
+    moved_backward = torch.stack(out_list_backward, dim=4).detach().cpu().numpy() # T, C, H, W, D
 
     for t in range(len(moved_backward)):
         # save moved image
-        moving_path = path_list_gz[t+1]
+        moving_path = path_list_gz[t]
 
         filename = os.path.basename(moving_path)[:-4] + '.npz'
         save_path = os.path.join(newpath_registered_backward, filename)
         np.savez(save_path, seg=moved_backward[t].squeeze())
-
-        flow_filename = os.path.basename(moving_path)[:-4] + '.npz'
-        save_path_flow = os.path.join(newpath_flow_backward, flow_filename)
-        np.savez(save_path_flow, flow=flow_backward[t], img=img_backward[t])
 
 
 
@@ -855,18 +812,6 @@ parser.add_argument('--multichannel', action='store_true',
                     help='specify that data has multiple channels')
 args = parser.parse_args()
 
-newpath_flow_forward = os.path.join(args.dirpath, args.dataset, args.test_or_val, 'Raw', 'Forward_flow')
-delete_if_exist(newpath_flow_forward)
-os.makedirs(newpath_flow_forward)
-
-newpath_flow_backward = os.path.join(args.dirpath, args.dataset, args.test_or_val, 'Raw', 'Backward_flow')
-delete_if_exist(newpath_flow_backward)
-os.makedirs(newpath_flow_backward)
-
-newpath_registered_forward = os.path.join(args.dirpath, args.dataset, args.test_or_val, 'Raw', 'Registered_forward')
-delete_if_exist(newpath_registered_forward)
-os.makedirs(newpath_registered_forward)
-
 newpath_registered_backward = os.path.join(args.dirpath, args.dataset, args.test_or_val, 'Raw', 'Registered_backward')
 delete_if_exist(newpath_registered_backward)
 os.makedirs(newpath_registered_backward)
@@ -881,7 +826,7 @@ else:
 
 add_feat_axis = not args.multichannel
 
-config = read_config_video(os.path.join(os.path.dirname(args.model), 'config.yaml'))
+config = read_config(os.path.join(os.path.dirname(args.model), 'config.yaml'), False, False)
 
 config['fine_tuning'] = False
 config['mamba'] = False
@@ -923,8 +868,9 @@ elif args.dataset == 'Lib':
 
 # load and set up model
 # load the model
-
-model = build_seg_flow_gaussian_model(config, image_size=image_size, log_function=None)
+conv_layer = ConvBlocksLegacy
+model = build_2d_model(config, conv_layer=conv_layer, norm=getattr(torch.nn, config['norm']), log_function=None, image_size=image_size, window_size=8, middle=False, num_classes=4, processor=None)
+model.do_ds = False
 
 model.load_state_dict(torch.load(args.model)['state_dict'])
 model = model.cuda()
@@ -969,7 +915,6 @@ for (path_list_gz, path_list_pkl) in tqdm(zip(all_patient_paths, all_patient_pat
     assert int(os.path.basename(path_list_gz[0]).split('frame')[-1][:2]) == ed_number + 1
 
     with torch.no_grad():
-        if config['video_length'] > 2:
-            inference_window_all_chunk_whole(path_list_gz, newpath_flow_forward, newpath_flow_backward, newpath_registered_forward, newpath_registered_backward, model, image_size, es_number, label_input=config['label_input'], binary_distance_input=config['binary_distance_input'], distance_map_power=config['distance_map_power'])
+        inference_window_all_chunk_whole(path_list_gz, newpath_registered_backward, model, es_number)
 
     
