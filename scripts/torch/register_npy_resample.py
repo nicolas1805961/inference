@@ -509,7 +509,7 @@ def inference_window_all_chunk_whole(path_list_gz, newpath_flow_forward, newpath
 
 
 
-def inference_only_flow(path_list_gz, path_list_gt, newpath_flow, newpath_registered, model, image_size, es_number, pretrained_network):
+def inference_iterative_warp(path_list_gz, newpath_flow, newpath_registered, model, image_size, es_number):
     motion_estimation = SpatialTransformer(size=(image_size, image_size)).to('cuda:0')
 
     patient_name = os.path.basename(path_list_gz[0]).split('_')[0]
@@ -527,33 +527,42 @@ def inference_only_flow(path_list_gz, path_list_gt, newpath_flow, newpath_regist
 
     x_list = []
     gt_list = []
-    for (path_gz, path_gt) in zip(path_list_gz, path_list_gt):
-        x, fixed_affine = vxm.py.utils.load_volfile(path_gz, add_batch_axis=True, add_feat_axis=add_feat_axis, ret_affine=True)
-        x = torch.from_numpy(x).to(device).float().permute(0, 4, 1, 2, 3)
+    mask_list = []
+    for path_gz in path_list_gz:
+        data = np.load(path_gz)
+        x = data[0][None, None]
+        gt = data[1][None, None]
+        mask = data[2:-1][None]
 
-        gt = vxm.py.utils.load_volfile(path_gt, add_batch_axis=True, add_feat_axis=add_feat_axis)
-        gt = torch.from_numpy(gt).to(device).float().permute(0, 4, 1, 2, 3)
+        #fig, ax = plt.subplots(1, 3)
+        #ax[0].imshow(mask[0, 0, :, :, 0], cmap='hot')
+        #ax[1].imshow(mask[0, 1, :, :, 0], cmap='hot')
+        #ax[2].imshow(mask[0, 2, :, :, 0], cmap='hot')
+        #plt.show()
+
+        x = torch.from_numpy(x).to(device).float()
+        gt = torch.from_numpy(gt).to(device).float()
+        mask = torch.from_numpy(mask).to(device).float()
+
+        #x, fixed_affine = vxm.py.utils.load_volfile(path_gz, add_batch_axis=True, add_feat_axis=add_feat_axis, ret_affine=True)
+        #gt = vxm.py.utils.load_volfile(path_gt, add_batch_axis=True, add_feat_axis=add_feat_axis)
         
         x_list.append(x)
         gt_list.append(gt)
+        mask_list.append(mask)
     
     x = torch.stack(x_list, dim=0)
     gt = torch.stack(gt_list, dim=0)
+    mask = torch.stack(mask_list, dim=0)
 
-    out_list = []
-    out_list_flow = []
-    out_list_img = []
+    flow_list_all = []
+    moved_list_all = []
+    img_list_all = []
     for d in range(x.shape[-1]):
-        current_x = x[:, :, :, :, :, d]
+        current_data_depth_seg = gt[:, :, :, :, :, d]
+        current_data_depth = x[:, :, :, :, :, d]
 
-        #indices = np.arange(len(current_x))
-        #indices1 = indices[:es_idx + 1]
-        #indices2 = indices[es_idx:]
-        #indices2 = np.concatenate([np.array(indices[0]).reshape(1,), indices2[::-1]])
-        #print(indices1)
-        #print(indices2)
-
-        indices = torch.arange(1, len(current_x))
+        indices = torch.arange(1, len(current_data_depth))
         chunk1 = indices[:es_idx-1]
         chunk2 = indices[es_idx-1:]
         chunk2 = torch.flip(chunk2, dims=[0])
@@ -561,47 +570,43 @@ def inference_only_flow(path_list_gz, path_list_gt, newpath_flow, newpath_regist
         chunk1_0 = torch.cat([torch.tensor([0]), chunk1])
         chunk2_0 = torch.cat([torch.tensor([0]), chunk2])
 
-        if pretrained_network:
-            with torch.no_grad():
-                first_input = NormalizeIntensity()(torch.clone(current_x[0]))
-                initial_mask = pretrained_network(first_input)['pred']
-                #initial_mask = torch.softmax(initial_mask, dim=1)
-
-                #fig, ax = plt.subplots(1, 3)
-                #ax[0].imshow(current_x[0, 0, 0].cpu(), cmap='gray')
-                #ax[1].imshow(initial_mask.cpu()[0, 2], cmap='plasma')
-                #ax[2].imshow(gt[0, 0, 0, :, :, d].cpu(), cmap='gray')
-                #plt.show()
-        else:
-            initial_mask = gt[0, :, :, :, :, d]
-            initial_mask = torch.nn.functional.one_hot(initial_mask[:, 0].long(), num_classes=4).permute(0, 3, 1, 2).contiguous().float()
-
         chunk_list_flow = []
+        chunk_list_seg = []
 
         for cn, chunk in enumerate([chunk1_0, chunk2_0]):
-            
-            chunk_x = current_x[chunk]
+            chunk_x = current_data_depth[chunk]
+            chunk_seg = current_data_depth_seg[chunk]
 
-            #fig, ax = plt.subplots(1, 2)
-            #ax[0].imshow(chunk_x[0, 0, 0].cpu(), cmap='gray')
-            #ax[1].imshow(initial_mask.cpu()[0, 3], cmap='plasma')
-            #plt.show()
+            out_list_flow_depth = []
 
-            chunk_x = NormalizeIntensity()(chunk_x)
+            for t in range(len(chunk_x) - 1):
+                x_in = torch.stack([chunk_x[t], chunk_x[t + 1]], dim=0)
+                x_in = NormalizeIntensity()(x_in)
 
-            with torch.no_grad():
-                out = model(chunk_x, initial_mask, step=1)
-            flow_pred = out['flow'].detach().to('cpu')
-            del chunk_x
-            torch.cuda.empty_cache()
-            
-            #fig, ax = plt.subplots(1, 2)
-            #ax[0].imshow(torch.argmax(seg_pred, dim=2)[5, 0].cpu(), cmap='gray')
-            #ax[1].imshow(initial_mask.cpu()[0, 2], cmap='plasma')
-            #plt.show()
+                out = model(chunk_x, step=1)
+                warp = out['backward_flow'][0] # B, C, H, W
 
-            chunk_list_flow.append(flow_pred)
+                out_list_flow_depth.append(warp)
+        
+            flow = torch.stack(out_list_flow_depth, dim=0) # T, B, C, H, W
+            assert len(flow) == len(chunk_x) - 1
 
+            moved_list = []
+            for t1 in reversed(range(1, len(chunk_seg))):
+                current_moving_seg = chunk_seg[t1]
+                ed_target = torch.nn.functional.one_hot(current_moving_seg[:, 0].long(), num_classes=4).permute(0, 3, 1, 2).contiguous().float()
+                for t2 in reversed(range(t1)):
+                    ed_target = motion_estimation(flow=flow[t2], original=ed_target, mode='bilinear')
+                #moved = torch.argmax(ed_target, dim=1, keepdim=True).int() # B, 1, H, W
+                moved = ed_target # B, 4, H, W
+                moved_list.append(moved)
+            moved = torch.stack(moved_list, dim=0) # T, B, 4, H, W
+            assert len(moved) == len(chunk_x) - 1
+            moved = moved.flip(0)
+
+            chunk_list_flow.append(flow)
+            chunk_list_seg.append(moved)
+        
         nan_tensor_1 = torch.full(size=(len(chunk1),) + chunk_list_flow[0].shape[1:], fill_value=torch.nan, device='cuda:0')
         nan_tensor_2 = torch.full(size=(len(chunk2),) + chunk_list_flow[1].shape[1:], fill_value=torch.nan, device='cuda:0')
         nan_tensor_1 = chunk_list_flow[0].to('cuda:0')
@@ -612,202 +617,17 @@ def inference_only_flow(path_list_gz, path_list_gt, newpath_flow, newpath_regist
         
         warp = torch.cat([nan_tensor_1, torch.flip(nan_tensor_2, dims=[0])], dim=0)
 
-        assert len(warp) == len(current_x) - 1
+        assert len(warp) == len(current_data_depth) - 1
 
-        moving_seg = gt[0]
-        current_moving_seg = moving_seg[:, :, :, :, d]
-        ed_target = torch.nn.functional.one_hot(current_moving_seg[:, 0].long(), num_classes=4).permute(0, 3, 1, 2).contiguous().float()
+        nan_tensor_1 = torch.full(size=(len(chunk1) + 1,) + chunk_list_flow[0].shape[1:], fill_value=torch.nan, device='cuda:0')
+        nan_tensor_2 = torch.full(size=(len(chunk2),) + chunk_list_flow[1].shape[1:], fill_value=torch.nan, device='cuda:0')
+        nan_tensor_1 = chunk_list_seg[0].to('cuda:0')
+        nan_tensor_2 = chunk_list_seg[1].to('cuda:0')
+
+        assert torch.all(torch.isfinite(nan_tensor_1))
+        assert torch.all(torch.isfinite(nan_tensor_2))
         
-        registered_list = [current_moving_seg]
-        for t in range(len(warp)):
-
-            registered = motion_estimation(flow=warp[t], original=ed_target, mode='bilinear')
-            moved = torch.argmax(registered, dim=1, keepdim=True).int() # B, 1, H, W
-            registered_list.append(moved)
-        moved = torch.stack(registered_list, dim=0)
-        assert len(moved) == len(current_x)
-
-        out_list.append(moved[:, 0, 0])
-        out_list_flow.append(warp[:, 0].permute(0, 2, 3, 1).contiguous())
-        out_list_img.append(current_x[1:, 0, 0])
-    
-    moved = torch.stack(out_list, dim=3).detach().cpu().numpy() # T, H, W, D
-    flow = torch.stack(out_list_flow, dim=3).detach().cpu().numpy() # T - 1, H, W, D, 2
-    img = torch.stack(out_list_img, dim=3).detach().cpu().numpy() # T - 1, H, W, D
-
-    moving_path = path_list_gz[0]
-    filename = os.path.basename(moving_path)
-    save_path = os.path.join(newpath_registered, filename)
-    vxm.py.utils.save_volfile(moved[0].squeeze(), save_path, fixed_affine)
-
-    for t in range(1, len(moved)):
-        # save moved image
-        moving_path = path_list_gz[t]
-
-        filename = os.path.basename(moving_path)
-        save_path = os.path.join(newpath_registered, filename)
-        vxm.py.utils.save_volfile(moved[t].squeeze(), save_path, fixed_affine)
-
-        flow_filename = os.path.basename(moving_path)[:-7] + '.npz'
-        save_path_flow = os.path.join(newpath_flow, flow_filename)
-        np.savez(save_path_flow, flow=flow[t - 1], img=img[t - 1])
-
-
-
-
-
-def inference_iterative(path_list_gz, path_list_gt, newpath_flow, newpath_registered, model, image_size):
-    motion_estimation = SpatialTransformer(size=(image_size, image_size)).to('cuda:0')
-
-    patient_name = os.path.basename(path_list_gz[0]).split('_')[0]
-
-    newpath_flow = os.path.join(newpath_flow, patient_name)
-    newpath_registered = os.path.join(newpath_registered, patient_name)
-
-    delete_if_exist(newpath_flow)
-    os.makedirs(newpath_flow)
-
-    delete_if_exist(newpath_registered)
-    os.makedirs(newpath_registered)
-
-    data = []
-    for path in path_list_gz:
-        arr, affine = vxm.py.utils.load_volfile(path, add_batch_axis=True, add_feat_axis=add_feat_axis, ret_affine=True)
-        x = torch.from_numpy(arr).to(device).float().permute(0, 4, 1, 2, 3)
-        data.append(x)
-    data = torch.stack(data, dim=0)
-    data = data.permute(5, 0, 1, 2, 3, 4).contiguous()
-
-    data_seg = []
-    for path in path_list_gt:
-        arr = vxm.py.utils.load_volfile(path, add_batch_axis=True, add_feat_axis=add_feat_axis)
-        x = torch.from_numpy(arr).to(device).float().permute(0, 4, 1, 2, 3)
-        data_seg.append(x)
-    data_seg = torch.stack(data_seg, dim=0)
-    data_seg = data_seg.permute(5, 0, 1, 2, 3, 4).contiguous()
-
-    fixed_path = path_list_gz[0]
-
-    flow_list_all = []
-    moved_list_all = []
-    img_list_all = []
-    for d in range(len(data)):
-        current_fixed = data[d, 0]
-        out_list = []
-        out_list_flow = []
-        out_list_img = []
-        for t in range(len(path_list_gz)):
-            moving_path = path_list_gz[t]
-            if fixed_path == moving_path:
-                continue
-            filename = os.path.basename(moving_path)
-
-            current_moving = data[d, t]
-            moving_seg = data_seg[d, t]
-        
-            x = torch.stack([current_fixed, current_moving], dim=0)
-            x = NormalizeIntensity()(x)
-
-            out1, out2 = model(x, inference=False)
-            warp = out2['flow']
-
-            ed_target = torch.nn.functional.one_hot(moving_seg[:, 0].long(), num_classes=4).permute(0, 3, 1, 2).contiguous().float()
-            registered = motion_estimation(flow=warp, original=ed_target, mode='bilinear')
-            moved = torch.argmax(registered, dim=1, keepdim=True).int() # B, 1, H, W
-
-            out_list.append(moved[0, 0])
-            out_list_flow.append(warp[0].permute(1, 2, 0).contiguous())
-            out_list_img.append(current_fixed[0, 0])
-        
-        moved = torch.stack(out_list, dim=0).detach().cpu().numpy()
-        flow = torch.stack(out_list_flow, dim=0).detach().cpu().numpy()
-        img_sequence = torch.stack(out_list_img, dim=0).detach().cpu().numpy()
-
-        flow_list_all.append(flow)
-        moved_list_all.append(moved)
-        img_list_all.append(img_sequence)
-    
-    moved = np.stack(moved_list_all, axis=-1) # T-1, H, W, D
-    img = np.stack(img_list_all, axis=-1) # T-1, H, W, D
-    flow = np.stack(flow_list_all, axis=-2) # T-1, H, W, D, 2
-
-    for t in range(len(moved)):
-        # save moved image
-        moving_path = path_list_gz[t + 1]
-
-        filename = os.path.basename(moving_path)
-        save_path = os.path.join(newpath_registered, filename)
-        vxm.py.utils.save_volfile(moved[t].squeeze(), save_path, affine)
-
-        flow_filename = os.path.basename(moving_path)[:-7] + '.npz'
-        save_path_flow = os.path.join(newpath_flow, flow_filename)
-        np.savez(save_path_flow, flow=flow[t].squeeze(), img=img[t].squeeze())
-
-
-
-def inference_iterative_warp(path_list_gz, path_list_gt, newpath_flow, newpath_registered, model, image_size):
-    motion_estimation = SpatialTransformer(size=(image_size, image_size)).to('cuda:0')
-
-    patient_name = os.path.basename(path_list_gz[0]).split('_')[0]
-
-    newpath_flow = os.path.join(newpath_flow, patient_name)
-    newpath_registered = os.path.join(newpath_registered, patient_name)
-
-    delete_if_exist(newpath_flow)
-    os.makedirs(newpath_flow)
-
-    delete_if_exist(newpath_registered)
-    os.makedirs(newpath_registered)
-
-    data = []
-    for path in path_list_gz:
-        arr, affine = vxm.py.utils.load_volfile(path, add_batch_axis=True, add_feat_axis=add_feat_axis, ret_affine=True)
-        x = torch.from_numpy(arr).to(device).float().permute(0, 4, 1, 2, 3)
-        data.append(x)
-    data = torch.stack(data, dim=0)
-    data = data.permute(5, 0, 1, 2, 3, 4).contiguous()
-
-    data_seg = []
-    for path in path_list_gt:
-        arr = vxm.py.utils.load_volfile(path, add_batch_axis=True, add_feat_axis=add_feat_axis)
-        x = torch.from_numpy(arr).to(device).float().permute(0, 4, 1, 2, 3)
-        data_seg.append(x)
-    data_seg = torch.stack(data_seg, dim=0)
-    data_seg = data_seg.permute(5, 0, 1, 2, 3, 4).contiguous()
-
-    flow_list_all = []
-    moved_list_all = []
-    img_list_all = []
-    for d in range(len(data)):
-        current_data_depth_seg = data_seg[d]
-        current_data_depth = data[d]
-
-        out_list_flow_depth = []
-        out_list_img = []
-
-        for t in range(len(current_data_depth) - 1):
-            x = torch.stack([current_data_depth[t], current_data_depth[t + 1]], dim=0)
-            x = NormalizeIntensity()(x)
-
-            out1, out2 = model(x, inference=False)
-            warp = out2['flow'] # B, C, H, W
-
-            out_list_flow_depth.append(warp)
-            out_list_img.append(current_data_depth[t])
-        
-        flow = torch.stack(out_list_flow_depth, dim=0) # T, B, C, H, W
-        img_sequence = torch.stack(out_list_img, dim=0) # T, B, C, H, W
-        assert len(flow) == len(img_sequence) == len(path_list_gz) - 1
-
-        moved_list = []
-        current_moving_seg = current_data_depth_seg[-1]
-        ed_target = torch.nn.functional.one_hot(current_moving_seg[:, 0].long(), num_classes=4).permute(0, 3, 1, 2).contiguous().float()
-        for t in reversed(range(len(flow))):
-            ed_target = motion_estimation(flow=flow[t], original=ed_target, mode='bilinear')
-            moved = torch.argmax(ed_target, dim=1, keepdim=True).int() # B, 1, H, W
-            moved_list.append(moved)
-        moved = torch.stack(moved_list, dim=0)
-        assert len(moved) == len(current_data_depth) - 1
+        seg = torch.cat([nan_tensor_1, torch.flip(nan_tensor_2, dims=[0])], dim=0)
 
         #moved_list = []
         #for t in range(len(flow)):
@@ -820,9 +640,184 @@ def inference_iterative_warp(path_list_gz, path_list_gt, newpath_flow, newpath_r
         #moved = torch.stack(moved_list, dim=0)
         #assert len(moved) == len(current_data_depth) - 1
 
-        flow_list_all.append(flow.cpu())
-        moved_list_all.append(moved.cpu())
-        img_list_all.append(img_sequence.cpu())
+        flow_list_all.append(warp.cpu())
+        moved_list_all.append(seg.cpu())
+        img_list_all.append(current_data_depth[1:].cpu())
+    
+    moved = np.stack(moved_list_all, axis=-1) # T-1, 1, 4, H, W, D
+    img = np.stack(img_list_all, axis=-1) # T-1, 1, 1, H, W, D
+    flow = np.stack(flow_list_all, axis=-1) # T-1, 1, 2, H, W, D
+    flow = flow.transpose(0, 1, 3, 4, 5, 2) # T-1, 1, H, W, D, 2
+
+    for t in range(len(moved)):
+        # save moved image
+        moving_path = path_list_gz[t + 1]
+
+        filename = os.path.basename(moving_path)[:-4] + '.npz'
+        save_path = os.path.join(newpath_registered, filename)
+        np.savez(save_path, seg=moved[t].squeeze())
+
+        flow_filename = os.path.basename(moving_path)[:-4] + '.npz'
+        save_path_flow = os.path.join(newpath_flow, flow_filename)
+        np.savez(save_path_flow, flow=flow[t].squeeze(), img=img[t].squeeze())
+
+
+
+
+
+def inference_iterative_warp_sum(path_list_gz, newpath_flow, newpath_registered, model, image_size, es_number):
+    motion_estimation = SpatialTransformer(size=(image_size, image_size)).to('cuda:0')
+
+    patient_name = os.path.basename(path_list_gz[0]).split('_')[0]
+
+    newpath_flow = os.path.join(newpath_flow, patient_name)
+    newpath_registered = os.path.join(newpath_registered, patient_name)
+
+    delete_if_exist(newpath_flow)
+    os.makedirs(newpath_flow)
+
+    delete_if_exist(newpath_registered)
+    os.makedirs(newpath_registered)
+
+    es_idx = np.where([int(os.path.basename(path_list_gz[i]).split('frame')[-1][:2]) == es_number + 1 for i in range(len(path_list_gz))])[0][0]
+
+    x_list = []
+    gt_list = []
+    mask_list = []
+    for path_gz in path_list_gz:
+        data = np.load(path_gz)
+        x = data[0][None, None]
+        gt = data[1][None, None]
+        mask = data[2:-1][None]
+
+        #fig, ax = plt.subplots(1, 3)
+        #ax[0].imshow(mask[0, 0, :, :, 0], cmap='hot')
+        #ax[1].imshow(mask[0, 1, :, :, 0], cmap='hot')
+        #ax[2].imshow(mask[0, 2, :, :, 0], cmap='hot')
+        #plt.show()
+
+        x = torch.from_numpy(x).to(device).float()
+        gt = torch.from_numpy(gt).to(device).float()
+        mask = torch.from_numpy(mask).to(device).float()
+
+        #x, fixed_affine = vxm.py.utils.load_volfile(path_gz, add_batch_axis=True, add_feat_axis=add_feat_axis, ret_affine=True)
+        #gt = vxm.py.utils.load_volfile(path_gt, add_batch_axis=True, add_feat_axis=add_feat_axis)
+        
+        x_list.append(x)
+        gt_list.append(gt)
+        mask_list.append(mask)
+    
+    x = torch.stack(x_list, dim=0)
+    gt = torch.stack(gt_list, dim=0)
+    mask = torch.stack(mask_list, dim=0)
+
+    flow_list_all = []
+    moved_list_all = []
+    img_list_all = []
+    for d in range(x.shape[-1]):
+        current_data_depth_seg = gt[:, :, :, :, :, d]
+        current_data_depth = x[:, :, :, :, :, d]
+
+        indices = torch.arange(1, len(current_data_depth))
+        chunk1 = indices[:es_idx-1]
+        chunk2 = indices[es_idx-1:]
+        chunk2 = torch.flip(chunk2, dims=[0])
+
+        chunk1_0 = torch.cat([torch.tensor([0]), chunk1])
+        chunk2_0 = torch.cat([torch.tensor([0]), chunk2])
+
+        chunk_list_flow = []
+        chunk_list_seg = []
+
+        for cn, chunk in enumerate([chunk1_0, chunk2_0]):
+            chunk_x = current_data_depth[chunk]
+            chunk_seg = current_data_depth_seg[chunk]
+
+            out_list_flow_depth = []
+
+            for t in range(len(chunk_x) - 1):
+                x_in = torch.stack([chunk_x[t], chunk_x[t + 1]], dim=0)
+                x_in = NormalizeIntensity()(x_in)
+
+                out = model(chunk_x, step=1)
+                warp = out['backward_flow'][0] # B, C, H, W
+
+                out_list_flow_depth.append(warp)
+        
+            flow = torch.stack(out_list_flow_depth, dim=0) # T, B, C, H, W
+            assert len(flow) == len(chunk_x) - 1
+
+            out_list_flow_depth = []
+            cumulative = flow[0]
+            for t1 in range(len(flow)):
+                next_flow = flow[t1]
+                #fig, ax = plt.subplots(1, 1)
+                ##arr = arr.transpose((1, 0, 2, 3))
+                #step_quiver = 4
+                #X, Y = np.meshgrid(np.arange(0, cumulative.shape[-2], step=step_quiver), np.arange(cumulative.shape[-1], step=step_quiver))
+                #ax.imshow(img_sequence[0, 0, 0].cpu(), cmap='gray')
+                #ax.quiver(X, Y, cumulative[0, 1, ::step_quiver, ::step_quiver].cpu(), cumulative[0, 0, ::step_quiver, ::step_quiver].cpu(), color='r', angles='xy', scale_units='xy', scale=1)
+                #plt.show()
+                next_flow_x = next_flow[:, 0][:, None]
+                next_flow_y = next_flow[:, 1][:, None]
+                next_flow_x = motion_estimation(flow=cumulative, original=next_flow_x, mode='bilinear')
+                next_flow_y = motion_estimation(flow=cumulative, original=next_flow_y, mode='bilinear')
+                next_flow = torch.cat([next_flow_x, next_flow_y], dim=1)
+                cumulative = cumulative + next_flow
+                out_list_flow_depth.append(cumulative)
+            flow = torch.stack(out_list_flow_depth, dim=0) # T, B, C, H, W
+            assert len(flow) == len(chunk_x) - 1
+
+            moved_list = []
+            for t in range(len(flow)):
+                current_moving_seg = chunk_seg[t + 1]
+                ed_target = torch.nn.functional.one_hot(current_moving_seg[:, 0].long(), num_classes=4).permute(0, 3, 1, 2).contiguous().float()
+                moved = motion_estimation(flow=flow[t], original=ed_target, mode='bilinear')
+                #moved = torch.argmax(moved, dim=1, keepdim=True).int() # B, 1, H, W
+                moved = moved # B, 4, H, W
+                moved_list.append(moved)
+            moved = torch.stack(moved_list, dim=0)
+            assert len(moved) == len(chunk_x) - 1
+
+            chunk_list_flow.append(flow)
+            chunk_list_seg.append(moved)
+        
+        nan_tensor_1 = torch.full(size=(len(chunk1),) + chunk_list_flow[0].shape[1:], fill_value=torch.nan, device='cuda:0')
+        nan_tensor_2 = torch.full(size=(len(chunk2),) + chunk_list_flow[1].shape[1:], fill_value=torch.nan, device='cuda:0')
+        nan_tensor_1 = chunk_list_flow[0].to('cuda:0')
+        nan_tensor_2 = chunk_list_flow[1].to('cuda:0')
+
+        assert torch.all(torch.isfinite(nan_tensor_1))
+        assert torch.all(torch.isfinite(nan_tensor_2))
+        
+        warp = torch.cat([nan_tensor_1, torch.flip(nan_tensor_2, dims=[0])], dim=0)
+
+        assert len(warp) == len(current_data_depth) - 1
+
+        nan_tensor_1 = torch.full(size=(len(chunk1) + 1,) + chunk_list_flow[0].shape[1:], fill_value=torch.nan, device='cuda:0')
+        nan_tensor_2 = torch.full(size=(len(chunk2),) + chunk_list_flow[1].shape[1:], fill_value=torch.nan, device='cuda:0')
+        nan_tensor_1 = chunk_list_seg[0].to('cuda:0')
+        nan_tensor_2 = chunk_list_seg[1].to('cuda:0')
+
+        assert torch.all(torch.isfinite(nan_tensor_1))
+        assert torch.all(torch.isfinite(nan_tensor_2))
+        
+        seg = torch.cat([nan_tensor_1, torch.flip(nan_tensor_2, dims=[0])], dim=0)
+
+        #moved_list = []
+        #for t in range(len(flow)):
+        #    current_moving_seg = current_data_depth_seg[t + 1]
+        #    ed_target = torch.nn.functional.one_hot(current_moving_seg[:, 0].long(), num_classes=4).permute(0, 3, 1, 2).contiguous().float()
+        #    for t2 in reversed(range(t + 1)):
+        #        ed_target = motion_estimation(flow=flow[t2], original=ed_target, mode='bilinear')
+        #    moved = torch.argmax(ed_target, dim=1, keepdim=True).int() # B, 1, H, W
+        #    moved_list.append(moved)
+        #moved = torch.stack(moved_list, dim=0)
+        #assert len(moved) == len(current_data_depth) - 1
+
+        flow_list_all.append(warp.cpu())
+        moved_list_all.append(seg.cpu())
+        img_list_all.append(current_data_depth[1:].cpu())
     
     moved = np.stack(moved_list_all, axis=-1) # T-1, 1, 1, H, W, D
     img = np.stack(img_list_all, axis=-1) # T-1, 1, 1, H, W, D
@@ -833,11 +828,11 @@ def inference_iterative_warp(path_list_gz, path_list_gt, newpath_flow, newpath_r
         # save moved image
         moving_path = path_list_gz[t + 1]
 
-        filename = os.path.basename(moving_path)
+        filename = os.path.basename(moving_path)[:-4] + '.npz'
         save_path = os.path.join(newpath_registered, filename)
-        vxm.py.utils.save_volfile(moved[t].squeeze(), save_path, affine)
+        np.savez(save_path, seg=moved[t].squeeze())
 
-        flow_filename = os.path.basename(moving_path)[:-7] + '.npz'
+        flow_filename = os.path.basename(moving_path)[:-4] + '.npz'
         save_path_flow = os.path.join(newpath_flow, flow_filename)
         np.savez(save_path_flow, flow=flow[t].squeeze(), img=img[t].squeeze())
 
@@ -971,5 +966,7 @@ for (path_list_gz, path_list_pkl) in tqdm(zip(all_patient_paths, all_patient_pat
     with torch.no_grad():
         if config['video_length'] > 2:
             inference_window_all_chunk_whole(path_list_gz, newpath_flow_forward, newpath_flow_backward, newpath_registered_forward, newpath_registered_backward, model, image_size, es_number, label_input=config['label_input'], binary_distance_input=config['binary_distance_input'], distance_map_power=config['distance_map_power'])
-
+        else:
+            inference_iterative_warp(path_list_gz, newpath_flow_backward, newpath_registered_backward, model, image_size, es_number)
+            #inference_iterative_warp_sum(path_list_gz, newpath_flow_backward, newpath_registered_backward, model, image_size, es_number)
     
